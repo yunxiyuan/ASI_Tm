@@ -16,7 +16,7 @@ ASI_Tm/
 ├── AisTransmitter.cpp    # Socket 创建 / AIS 提取 / 发送逻辑
 ├── mcast_receiver.cpp    # 组播接收端 (mcast_receiver)
 ├── CMakeLists.txt        # CMake 构建脚本
-├── send_data.txt         # 示例 AIS 数据 (NMEA 0183 语句)
+├── 2025_10_28_13_57_37_450RawData2.txt  # 原始串口数据 (含 Time 戳 + AIS + 心跳)
 └── README.md
 ```
 
@@ -137,23 +137,23 @@ Windows 下 CMake 会自动链接 `ws2_32.lib`。
 ### 发送端 (`ASI_transmit`)
 
 ```bash
-# 基本用法：将 send_data.txt 中的 AIS 语句发送到本地
-ASI_transmit send_data.txt
+# 基本用法：提取原始数据中的 AIS 语句发送到本地
+ASI_transmit 2025_10_28_13_57_37_450RawData2.txt
 
 # 发送到指定组播地址
-ASI_transmit send_data.txt --host 239.192.0.1 --port 10110
+ASI_transmit 2025_10_28_13_57_37_450RawData2.txt --host 239.192.0.1 --port 10110
 
 # 广播发送（非组播地址）
-ASI_transmit send_data.txt --host 192.168.1.255 --port 10110
+ASI_transmit 2025_10_28_13_57_37_450RawData2.txt --host 192.168.1.255 --port 10110
 
 # 带发送间隔 + 循环发送
-ASI_transmit send_data.txt --host 239.192.0.1 --port 10110 --delay 100 --loop
+ASI_transmit 2025_10_28_13_57_37_450RawData2.txt --host 239.192.0.1 --port 10110 --delay 100 --loop
 
 # 设置组播 TTL（跨路由器跳数）
-ASI_transmit send_data.txt --host 239.192.0.1 --ttl 16
+ASI_transmit 2025_10_28_13_57_37_450RawData2.txt --host 239.192.0.1 --ttl 16
 
 # 同时写入文件
-ASI_transmit send_data.txt --host 239.192.0.1 --output result.txt
+ASI_transmit 2025_10_28_13_57_37_450RawData2.txt --host 239.192.0.1 --output result.txt
 ```
 
 #### 命令行参数
