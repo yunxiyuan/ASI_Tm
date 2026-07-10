@@ -5,29 +5,52 @@
 
 一套跨平台的 **AIS（船舶自动识别系统）数据 UDP 组播/广播** 工具集，支持从原始数据文件中提取 NMEA 0183 格式的 AIS 语句，通过 IPv4 组播（IGMP）或广播方式发送到网络中，并提供配套的接收端进行验证。
 
+项目提供 **两个版本** 的实现，方便对比学习：
+
+| 版本 | 目录 | 说明 |
+|---|---|---|
+| 裸 Socket 版本 | `raw_socket/` | 原始 UDP socket 实现，直接 sendto/recvfrom |
+| gRPC 版本 | `grpc_version/` | 使用 protobuf + gRPC 服务端流替代裸 socket |
+
 ---
 
 ## 项目结构
 
 ```
 ASI_Tm/
-├── main.cpp              # 发送端入口 (ASI_transmit)
-├── AisTransmitter.h      # 发送端头文件
-├── AisTransmitter.cpp    # Socket 创建 / AIS 提取 / 发送逻辑
-├── mcast_receiver.cpp    # 组播接收端 (mcast_receiver)
-├── CMakeLists.txt        # CMake 构建脚本
-├── 2025_10_28_13_57_37_450RawData2.txt  # 原始串口数据 (含 Time 戳 + AIS + 心跳)
+├── data/
+│   └── 2025_10_28_13_57_37_450RawData2.txt  # 原始串口数据
+├── raw_socket/                                # 裸 Socket 版本
+│   ├── main.cpp                               # 发送端入口 (ASI_transmit)
+│   ├── AisTransmitter.h                       # 发送端头文件
+│   ├── AisTransmitter.cpp                     # Socket 创建 / AIS 提取 / 发送逻辑
+│   ├── mcast_receiver.cpp                     # 组播接收端 (mcast_receiver)
+│   └── CMakeLists.txt
+├── grpc_version/                              # gRPC 版本
+│   ├── ais.proto                              # protobuf 协议定义
+│   ├── ais_server.cc                          # gRPC 服务端（提取文件 + 流式发送）
+│   ├── ais_client.cc                          # gRPC 客户端（接收并显示）
+│   └── CMakeLists.txt
 └── README.md
 ```
 
-## 可执行文件
+---
 
-| 可执行文件 | 角色 | 说明 |
-|-----------|------|------|
-| `ASI_transmit` | **发送端** | 从文件提取 AIS 语句，通过 UDP 组播/广播发出 |
-| `mcast_receiver` | **接收端** | 加入组播组，接收并显示 AIS 语句 |
+## 版本对比
+
+| | raw_socket | grpc_version |
+|---|---|---|
+| 传输方式 | `sendto()` UDP | HTTP/2 TCP |
+| 数据格式 | 原始 NMEA ASCII 字符串 | protobuf 二进制序列化 |
+| 错误处理 | `return false` + cerr | `grpc::Status` 错误码 |
+| 代码量 | ~317 行 | ~100 行业务 + 13 行 proto |
+| 跨语言 | 需每种语言自己实现解析 | 一份 proto 生成 12 种语言代码 |
+| 消息边界 | UDP 天然边界 | HTTP/2 帧 |
+| 流控 | 无 | HTTP/2 原生流量控制 |
 
 ---
+
+# 一、raw_socket 版本
 
 ## 协议栈（共涉及 5 个协议）
 
@@ -54,7 +77,7 @@ ASI_Tm/
 - `!AIVDM` — 接收自其他船舶的数据（**V**HF Data-link **M**essage）
 - `!AIVDO` — 本船自身广播的数据（**V**HF Data-link **O**wn vessel）
 
-程序通过正则表达式 `!AIVD[OM],[^\r\n]+`（[AisTransmitter.cpp:55](AisTransmitter.cpp#L55)）从输入文件中逐行提取 AIS 语句。
+程序通过正则表达式 `!AIVD[OM],[^\r\n]+`（[AisTransmitter.cpp:55](raw_socket/AisTransmitter.cpp#L55)）从输入文件中逐行提取 AIS 语句。
 
 ### 2. UDP（传输层）
 
@@ -64,7 +87,7 @@ ASI_Tm/
 - 组播必须基于 UDP（TCP 不支持一对多）
 - 低延迟，无连接建立开销
 
-代码 ([AisTransmitter.cpp:83](AisTransmitter.cpp#L83) / [AisTransmitter.cpp:131](AisTransmitter.cpp#L131))：
+代码 ([AisTransmitter.cpp:83](raw_socket/AisTransmitter.cpp#L83) / [AisTransmitter.cpp:131](raw_socket/AisTransmitter.cpp#L131))：
 ```cpp
 socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)   // IPv4 + 数据报 + UDP
 ```
@@ -72,8 +95,8 @@ socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)   // IPv4 + 数据报 + UDP
 ### 3. IPv4 组播（网络层）
 
 - 组播地址范围：`224.0.0.0 ~ 239.255.255.255`（D 类地址，前 4 位 = `1110`）
-- [main.cpp:91-96](main.cpp#L91-L96)：程序自动检测目标 IP 首字节 `∈ [224, 239]` 来切换组播/广播模式
-- **TTL（Time To Live）**：通过 `setsockopt(IPPROTO_IP, IP_MULTICAST_TTL, ttl)` 控制（[AisTransmitter.cpp:92-98](AisTransmitter.cpp#L92-L98)）
+- [main.cpp:91-96](raw_socket/main.cpp#L91-L96)：程序自动检测目标 IP 首字节 `∈ [224, 239]` 来切换组播/广播模式
+- **TTL（Time To Live）**：通过 `setsockopt(IPPROTO_IP, IP_MULTICAST_TTL, ttl)` 控制（[AisTransmitter.cpp:92-98](raw_socket/AisTransmitter.cpp#L92-L98)）
   - `TTL=1`：不跨路由器（同子网）
   - `TTL=16`：覆盖企业网
   - `TTL=64`：更大范围
@@ -85,13 +108,8 @@ socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)   // IPv4 + 数据报 + UDP
 
 | socket 选项 | 效果 | 代码位置 |
 |-------------|------|----------|
-| `IP_ADD_MEMBERSHIP` | 内核自动发出 **IGMP Membership Report**，通知路由器 | [mcast_receiver.cpp:109-119](mcast_receiver.cpp#L109-L119) |
-| `IP_DROP_MEMBERSHIP` | 内核自动发出 **IGMP Leave**，退出组播组 | [mcast_receiver.cpp:159-160](mcast_receiver.cpp#L159-L160) |
-
-#### IGMP 在网络中间设备上的两个关键机制：
-
-- **IGMP Snooping（交换机）**：二层交换机"偷看" IGMP 报文，记录哪些端口加入了哪些组播组，从而只向相关端口转发组播数据帧，避免泛洪
-- **IGMP Querier（路由器）**：路由器定期发送 Query 报文，确认子网内还有哪些主机在监听组播组
+| `IP_ADD_MEMBERSHIP` | 内核自动发出 **IGMP Membership Report**，通知路由器 | [mcast_receiver.cpp:109-119](raw_socket/mcast_receiver.cpp#L109-L119) |
+| `IP_DROP_MEMBERSHIP` | 内核自动发出 **IGMP Leave**，退出组播组 | [mcast_receiver.cpp:159-160](raw_socket/mcast_receiver.cpp#L159-L160) |
 
 ### 5. Ethernet（链路层）
 
@@ -112,352 +130,127 @@ MAC 组播地址:     01:00:5E:40:00:01
 
 ---
 
-## 编译
+## 编译与运行 (raw_socket)
 
 ### 前置条件
 
 - CMake ≥ 3.16
 - C++20 编译器（MSVC 2019+ / GCC 10+ / Clang 12+）
 
-### 构建步骤
+### 构建
 
 ```bash
-cd ASI_Tm
+cd raw_socket
 mkdir build && cd build
 cmake ..
-cmake --build .
+make -j1
 ```
 
 Windows 下 CMake 会自动链接 `ws2_32.lib`。
 
----
-
-## 使用方法
-
-### 发送端 (`ASI_transmit`)
+### 发送端
 
 ```bash
-# 基本用法：提取原始数据中的 AIS 语句发送到本地
-ASI_transmit 2025_10_28_13_57_37_450RawData2.txt
+# 基本用法
+./ASI_transmit ../../data/2025_10_28_13_57_37_450RawData2.txt
 
-# 发送到指定组播地址
-ASI_transmit 2025_10_28_13_57_37_450RawData2.txt --host 239.192.0.1 --port 10110
+# 指定组播地址
+./ASI_transmit ../../data/2025_10_28_13_57_37_450RawData2.txt --host 239.192.0.1 --port 10110
 
-# 广播发送（非组播地址）
-ASI_transmit 2025_10_28_13_57_37_450RawData2.txt --host 192.168.1.255 --port 10110
-
-# 带发送间隔 + 循环发送
-ASI_transmit 2025_10_28_13_57_37_450RawData2.txt --host 239.192.0.1 --port 10110 --delay 100 --loop
-
-# 设置组播 TTL（跨路由器跳数）
-ASI_transmit 2025_10_28_13_57_37_450RawData2.txt --host 239.192.0.1 --ttl 16
-
-# 同时写入文件
-ASI_transmit 2025_10_28_13_57_37_450RawData2.txt --host 239.192.0.1 --output result.txt
+# 带发送间隔 + 循环
+./ASI_transmit ../../data/2025_10_28_13_57_37_450RawData2.txt --host 239.192.0.1 --port 10110 --delay 100 --loop
 ```
-
-#### 命令行参数
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `<输入文件>` | 包含 AIS 原始数据的文本文件 | 必填 |
-| `--host <IP>` | 目标地址（组播 224~239 自动切换组播模式） | `127.0.0.1` |
-| `--port <端口>` | 目标端口 | `10110` (AIS 常用端口) |
-| `--delay <毫秒>` | 每条发送间隔 | `0` |
-| `--ttl <跳数>` | 组播 TTL（同网段=1，企业网=16，更大范围=64） | `1` |
-| `--output <文件>` | 同时输出到文件 | 无 |
-| `--loop` | 循环发送模式 | 单次 |
-| `--help` | 显示帮助 | — |
+| `<输入文件>` | AIS 原始数据文件 | 必填 |
+| `--host <IP>` | 目标地址（224~239 自动切换组播） | `127.0.0.1` |
+| `--port <端口>` | 目标端口 | `10110` |
+| `--delay <ms>` | 发送间隔 | `0` |
+| `--ttl <跳数>` | 组播 TTL | `1` |
+| `--output <文件>` | 同时写入文件 | 无 |
+| `--loop` | 循环发送 | 单次 |
 
-### 接收端 (`mcast_receiver`)
+### 接收端
 
 ```bash
-# 默认监听 239.192.0.1:10110
-mcast_receiver
+# 默认 239.192.0.1:10110
+./mcast_receiver
 
-# 指定组播地址和端口
-mcast_receiver 239.192.0.1 10110
-
-# 监听其他组播组
-mcast_receiver 224.0.0.1 5000
-```
-
-按 `Ctrl+C` 停止接收，程序会自动发送 IGMP Leave 退出组播组。
-
----
-
-## 网络运行全流程
-
-整个系统由**发送端 (`ASI_transmit`)** + **网络设备（交换机/路由器）** + **接收端 (`mcast_receiver`)** 三部分组成。以下按时间顺序描述一次完整的组播数据收发过程。
-
----
-
-### 阶段一：接收端启动 & 加入组播组 (`mcast_receiver`)
-
-```
-接收端主机
-────────────
-
-步骤 1 ─ 创建 UDP socket
-        socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        │  作用: 创建一个 IPv4 UDP 数据报套接字
-        │  协议: UDP over IPv4
-        ▼
-步骤 2 ─ 端口复用
-        setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-        │  作用: 允许多个接收端进程同时监听同一端口
-        │  协议: UDP (端口复用是 UDP 的常见用法)
-        ▼
-步骤 3 ─ 绑定到全零地址 (INADDR_ANY)
-        bind(sock, 0.0.0.0:10110)
-        │  作用: 告诉协议栈——所有网卡收到的、目的端口为 10110 的 UDP 包都给我
-        │  协议: UDP + IP
-        ▼
-步骤 4 ─ ★ 加入组播组 (核心步骤)
-        setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, {mcast=239.192.0.1, iface=INADDR_ANY})
-        │
-        ├── 内核动作 (a): 发送 IGMP Membership Report 报文到局域网
-        │       dst=239.192.0.1, IGMP type=0x16 (Membership Report v2)
-        │       → 本地路由器收到后更新 IGMP 表
-        │       → 如果有 PIM 等组播路由协议，会向上游路由器传播 Join
-        │
-        ├── 内核动作 (b): 配置网卡 MAC 过滤寄存器
-        │       计算组播 MAC: 239.192.0.1 → 01:00:5E:40:00:01
-        │       网卡硬件层开始接收 dst_mac=01:00:5E:40:00:01 的帧
-        │
-        └── 交换机动作 (IGMP Snooping):
-                交换机看到 IGMP Report 报文后，记录: "端口 X 加入了组 239.192.0.1"
-                后续该组的组播流量只向端口 X 转发
-        ▼
-步骤 5 ─ 进入接收循环
-        recvfrom(sock, buf, ...)  ← 阻塞等待
+# 指定地址和端口
+./mcast_receiver 239.192.0.1 10110
 ```
 
 ---
 
-### 阶段二：发送端发送数据 (`ASI_transmit`)
+# 二、gRPC 版本
 
-```
-发送端主机
-────────────
+使用 **protobuf** 定义协议 + **gRPC 服务端流** 替代裸 socket，底层自动处理序列化、传输、错误码。
 
-步骤 1 ─ 读取文件 & 提取 AIS 语句
-        用正则 !AIVD[OM],[^\r\n]+ 从输入文件逐行提取 NMEA 0183 语句
-        协议: NMEA 0183 / AIS (应用层)
+## 协议定义 ([ais.proto](grpc_version/ais.proto))
 
-步骤 2 ─ 判断目标地址类型
-        if (目标IP首字节 ∈ [224, 239])  →  组播模式
-        else                           →  广播/单播模式
-        协议: IPv4 寻址 (网络层)
+```protobuf
+service AisService {
+  rpc StreamAisSentences (AisRequest) returns (stream AisSentence) {}
+}
 
-步骤 3 ─ 创建 Socket (以组播为例)
-        sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        协议: UDP over IPv4
+message AisRequest {
+  string filter = 1;     // 过滤条件，空=全部
+  int32 max_count = 2;   // 最多发多少条，0=全部
+}
 
-步骤 4 ─ 配置 Socket 选项
-        setsockopt(IPPROTO_IP, IP_MULTICAST_TTL, ttl)
-        │  作用: 设置 IP 包头的 TTL 字段，控制跨路由器跳数
-        │  协议: IP Multicast (网络层)
-        │
-        setsockopt(SOL_SOCKET, SO_BROADCAST, 1)
-        │  作用: 允许发送广播（兼容模式）
-        │
-        setsockopt(IPPROTO_IP, IP_MULTICAST_IF, iface)  [可选]
-           作用: 多网卡时指定出站网卡
-
-步骤 5 ─ 逐条发送 (sendto)
-        sendto(sock, "!AIVDM,...", len, 0, {dst=239.192.0.1, port=10110}, sizeof(addr))
-
-        这个调用在内核中触发以下封装过程:
-        │
-        ▼
-        ┌── 应用层 ────────────────────────────────────┐
-        │ 数据:  "!AIVDM,1,1,,A,..."                   │  NMEA 0183 明文
-        └────────────────┬─────────────────────────────┘
-                         │
-                         ▼
-        ┌── 传输层 ────────────────────────────────────┐
-        │ UDP 头:  src_port=ephemeral  dst_port=10110   │  UDP 协议 (用户态→内核)
-        │ 负载:    "!AIVDM,1,1,,A,..."                  │
-        │ 校验和:  可选                                 │
-        └────────────────┬─────────────────────────────┘
-                         │
-                         ▼
-        ┌── 网络层 ────────────────────────────────────┐
-        │ IP 头:   src=本机IP  dst=239.192.0.1          │  IPv4 Multicast
-        │          protocol=17(UDP)  TTL=1              │  D 类地址
-        │ 负载:    [UDP 头 + AIS 数据]                   │
-        └────────────────┬─────────────────────────────┘
-                         │
-                         ▼
-        ┌── 链路层 ────────────────────────────────────┐
-        │ MAC 头:  dst=01:00:5E:40:00:01               │  Ethernet
-        │          src=本机网卡MAC                       │  组播 MAC 映射
-        │          EtherType=0x0800(IPv4)               │
-        │ 负载:    [IP 头 + UDP 头 + AIS 数据]           │
-        │ FCS:     CRC32                                │
-        └────────────────┬─────────────────────────────┘
-                         │
-                         ▼
-                    帧从网卡物理层发出 (PHY)
+message AisSentence {
+  int32 index = 1;        // 序号
+  string payload = 2;     // NMEA 语句内容
+  int64 timestamp_ms = 3; // 发送时间戳
+}
 ```
 
----
+**为什么用服务端流？** AIS 数据是"一对多持续推送"场景，客户端发一次请求，服务端持续推送所有语句，天然适合 Server Streaming 模式。
 
-### 阶段三：网络设备转发
+## 编译与运行 (grpc_version)
 
-```
-                    交换机 (支持 IGMP Snooping)
-                    ──────────────────────────────
+### 前置条件
 
-帧到达交换机端口 ──→ 查 MAC 地址表 + IGMP Snooping 表
-                    │
-                    ├── 如果目标 MAC 是组播 MAC (01:00:5E:xx:xx:xx):
-                    │      IGMP Snooping 表查询 → 哪些端口加入了这个组?
-                    │      ├── 有记录 → 只向这些端口转发 ✓ (不泛洪)
-                    │      └── 无记录 → 按配置处理 (泛洪到同 VLAN / 丢弃)
-                    │
-                    └── 如果是普通单播 MAC:
-                          MAC 地址表查询 → 精确端口转发
+- CMake ≥ 3.16
+- C++17 编译器
+- protobuf + gRPC 已安装（`$HOME/.local` 或系统路径）
 
+### 构建
 
-                    路由器 (支持 IGMP Querier + PIM)
-                    ────────────────────────────────
-
-如果 TTL > 1 且需要跨网段:
-
-组播包到达路由器 ──→ TTL 减 1 → 如果 TTL == 0 → 丢弃
-                               │
-                               └── TTL > 0 → 查组播路由表 (PIM/Multicast Routing)
-                                               确定出接口列表
-                                               每个出接口复制一份发出
+```bash
+cd grpc_version
+mkdir build && cd build
+cmake -DCMAKE_PREFIX_PATH=$HOME/.local ..
+make -j1
 ```
 
----
+### 运行
 
-### 阶段四：接收端收到数据 (`mcast_receiver`)
-
-```
-接收端主机
-────────────
-
-帧从网卡进入:
-  │
-  ▼
-步骤 1 ─ 硬件 MAC 过滤 (网卡芯片)
-        检查 dst_mac 是否匹配已注册的组播 MAC 列表
-        ├── 不匹配 → 丢弃 (硬件层，CPU 无感知)
-        └── 匹配   → 接收帧，触发中断通知驱动
-  │
-  ▼
-步骤 2 ─ IP 层处理
-        检查 dst_ip:
-        ├── dst_ip == 239.192.0.1 → 匹配已加入的组播组 ✓
-        ├── TTL == 0             → 丢弃
-        └── 校验和错误            → 丢弃
-        提取 protocol 字段 = 17(UDP)，递交给 UDP 层
-  │
-  ▼
-步骤 3 ─ UDP 层处理
-        检查 dst_port == 10110:
-        ├── 匹配 bind(0.0.0.0:10110) → 找到监听 socket ✓
-        └── 没有 socket 监听          → 回复 ICMP Port Unreachable
-        通过 socket 缓冲区将数据递交给用户态进程
-  │
-  ▼
-步骤 4 ─ 用户态 recvfrom() 返回
-        recvfrom(buf) 解除阻塞
-        打印: [序号] 来源IP:端口 → !AIVDM,1,1,,A,...
-  │
-  ▼
-步骤 5 ─ 回到接收循环 → recvfrom() 阻塞等待下一条
+**终端 1 — 服务端**：
+```bash
+./ais_server ../../data/2025_10_28_13_57_37_450RawData2.txt
+# 输出: [就绪] gRPC AIS 服务端监听 0.0.0.0:50051
 ```
 
----
+**终端 2 — 客户端**：
+```bash
+./ais_client
+# 基本用法：接收全部 4913 条
 
-### 退出流程：接收端离开组播组
-
-```
-接收端按 Ctrl+C
-  │
-  ▼
-setsockopt(IPPROTO_IP, IP_DROP_MEMBERSHIP, {mcast=239.192.0.1})
-  │
-  ├── 内核发送 IGMP Leave 报文到局域网
-  │       dst=224.0.0.2 (All Routers), IGMP type=0x17 (Leave v2)
-  │
-  ├── 路由器更新 IGMP 表 → 发送 Group-Specific Query 确认是否还有其他成员
-  │       → 无其他成员回复 → 停止向该子网转发该组流量
-  │
-  ├── 交换机 IGMP Snooping 看到 Leave → 从 Snooping 表中删除该端口
-  │       → 后续该组的帧不再向该端口转发
-  │
-  └── 网卡移除 MAC 过滤项 → 不再接收 01:00:5E:40:00:01 的帧
-  │
-  ▼
-closeSocket(sock) → WSACleanup() → 进程退出
+./ais_client localhost:50051 "" 10
+# 只接收前 10 条
 ```
 
----
-
-### 完整流程图（端到端）
-
-```
-发送端 (ASI_transmit)                 交换机                    接收端 (mcast_receiver)
-─────────────────────              ────────────                ─────────────────────────
-
-                                                                 ┌───────── ① socket(UDP)
-                                                                 ├───────── ② SO_REUSEADDR
-                                                                 ├───────── ③ bind(0:10110)
-                                                                 ├───────── ④ IP_ADD_MEMBERSHIP
-                                                                 │           └→ IGMP Report → 交换机记表
-                                                                 ├───────── ⑤ recvfrom() 阻塞
-                                                                 │
-① extractAisSentences(file) ─→ AIS 语句列表                       │
-   协议: NMEA 0183                                                │
-② socket(UDP)                                                    │
-③ setsockopt(TTL)                                                │
-   协议: IP Multicast                                             │
-④ sendto("!AIVDM,..." → 239.192.0.1:10110)                       │
-   协议: UDP → IP → Ethernet                                      │
-           │                                                      │
-           ▼                                                      │
-⑤ IP 封装: dst=239.192.0.1 ──────────→ ⑥ 收到帧                  │
-           src=本机                     IGMP Snooping 查表        │
-           TTL=1                        端口 X 在组中 ✓           │
-           │                            定向转发 ──────────────→ ⑦ 帧到达网卡
-           ▼                                                         MAC=01:00:5E:40:00:01 匹配 ✓
-⑥ MAC 封装:                                                                 │
-   dst=01:00:5E:40:00:01                                               ⑧ IP 层: dst=239.192.0.1 ✓
-   物理层发送                                                               │
-                                                                       ⑨ UDP: dst_port=10110 ✓
-                                                                           │
-                                                                       ⑩ recvfrom() 返回
-                                                                          打印 AIS 语句
-                                                                           │
-                                                                       ⑪ 循环 → recvfrom() 再次阻塞
-                                                                           │
-发送端退出                                                             用户按 Ctrl+C
-                                                                           │
-                                                                       ⑫ IP_DROP_MEMBERSHIP
-                                                                          └→ IGMP Leave → 交换机删表
-                                                                           │
-                                                                       ⑬ closeSocket() → 退出
-```
-
-### 组播 vs 广播的关键区别
-
-| | 组播 (Multicast) | 广播 (Broadcast) |
+| 参数 | 说明 | 默认值 |
 |---|---|---|
-| **地址范围** | `224.0.0.0/4` | `x.x.x.255` / `255.255.255.255` |
-| **接收方式** | 主动加入 (IGMP Join) | 被动接收 |
-| **交换机行为** | IGMP Snooping，定向转发 | 泛洪到所有端口 |
-| **带宽效率** | 高（只发给订阅者） | 低（全子网泛洪） |
-| **跨网段** | 通过 PIM 等组播路由协议 | 不可跨路由器 |
+| `<地址:端口>` | 服务端地址 | `localhost:50051` |
+| `<filter>` | 过滤关键词 | 空（全部） |
+| `<max_count>` | 最多接收条数 | 0（全部） |
 
 ---
 
-## AIS 数据格式
+## 数据格式
 
 输入文件中的每一行可能包含多个字段，程序通过正则 `!AIVD[OM],[^\r\n]+` 提取有效的 NMEA 0183 语句：
 
@@ -471,16 +264,6 @@ closeSocket(sock) → WSACleanup() → 进程退出
 │      └───────── 当前片段号
 └──────────────── 语句类型: !AIVDM (其他船) / !AIVDO (本船)
 ```
-
----
-
-## 技术要点
-
-1. **自动模式切换**：根据目标 IP 首字节自动判断组播（224~239）或广播/单播模式
-2. **跨平台**：Windows 使用 Winsock2，Linux 使用 POSIX socket，通过条件编译统一接口
-3. **RAII Winsock 管理**：静态 guard 对象确保 `WSAStartup` / `WSACleanup` 配对
-4. **端口复用**：接收端使用 `SO_REUSEADDR`，允许多个接收进程同时监听
-5. **TTL 控制**：通过 `IP_MULTICAST_TTL` 限制组播包跨路由器的跳数
 
 ---
 
