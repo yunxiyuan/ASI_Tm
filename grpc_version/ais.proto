@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package ais;
+
+// 服务端流：客户端发一次请求，服务端持续推送 AIS 语句
+service AisService {
+  rpc StreamAisSentences (AisRequest) returns (stream AisSentence) {}
+}
+
+message AisRequest {
+  string filter = 1;     // 过滤条件，空=全部
+  int32 max_count = 2;   // 最多发多少条，0=全部
+}
+
+message AisSentence {
+  int32 index = 1;        // 序号
+  string payload = 2;     // NMEA 语句内容
+  int64 timestamp_ms = 3; // 发送时间戳
+}
