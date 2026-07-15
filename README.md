@@ -30,6 +30,8 @@ ASI_Tm/
 │   ├── ais.proto                              # protobuf 协议定义
 │   ├── ais_server.cc                          # gRPC 服务端（提取文件 + 流式发送）
 │   ├── ais_client.cc                          # gRPC 客户端（接收并显示）
+│   ├── log_wrapper.h/.cc                      # log4cplus 日志封装
+│   ├── log4cplus.properties                   # 日志配置（级别/格式/输出目的地）
 │   └── CMakeLists.txt
 └── README.md
 ```
@@ -215,13 +217,28 @@ message AisSentence {
 - CMake ≥ 3.16
 - C++17 编译器
 - protobuf + gRPC 已安装（`$HOME/.local` 或系统路径）
+- **log4cplus 2.x** 已编译安装（见下文"编译安装 log4cplus"）
+
+### 编译安装 log4cplus（动态库 .so）
+
+grpc_version 用 [log4cplus](https://github.com/log4cplus/log4cplus) 做日志。需先编译安装 2.x 版本（3.x 要求 C++23，不兼容本项目的 C++17）：
+
+```bash
+git clone --recurse-submodules https://github.com/log4cplus/log4cplus.git -b REL_2_2_0_1
+mkdir build_log4cplus && cd build_log4cplus
+cmake ../log4cplus -DBUILD_SHARED_LIBS=ON -DLOG4CPLUS_BUILD_TESTING=OFF -DCMAKE_INSTALL_PREFIX=$HOME/log4cplus_install
+cmake --build . -j"$(nproc)"
+cmake --install .
+```
+
+> **注意**：log4cplus 的 build 目录必须放在本地 ext4 磁盘，不能放 VMware 共享文件夹（hgfs/NTFS 不支持 Linux symlink，链接 .so 会报 `Operation not supported`）。
 
 ### 构建
 
 ```bash
 cd grpc_version
 mkdir build && cd build
-cmake -DCMAKE_PREFIX_PATH=$HOME/.local ..
+cmake -DCMAKE_PREFIX_PATH=$HOME/.local -Dlog4cplus_DIR=$HOME/log4cplus_install/lib/cmake/log4cplus ..
 make -j1
 ```
 
@@ -230,7 +247,9 @@ make -j1
 **终端 1 — 服务端**：
 ```bash
 ./ais_server ../../data/2025_10_28_13_57_37_450RawData2.txt
-# 输出: [就绪] gRPC AIS 服务端监听 0.0.0.0:50051
+# 输出(带时间戳/级别/logger名):
+#   11:33:20 INFO  [grpc.server] 从文件提取到 4913 条 AIS 语句
+#   11:33:20 INFO  [grpc.server] gRPC AIS 服务端监听 0.0.0.0:50051
 ```
 
 **终端 2 — 客户端**：
@@ -242,11 +261,35 @@ make -j1
 # 只接收前 10 条
 ```
 
+日志同时输出到控制台和 `logs/asi.log`（滚动文件，5MB/个，保留 3 个备份）。
+
 | 参数 | 说明 | 默认值 |
 |---|---|---|
 | `<地址:端口>` | 服务端地址 | `localhost:50051` |
 | `<filter>` | 过滤关键词 | 空（全部） |
 | `<max_count>` | 最多接收条数 | 0（全部） |
+
+### 日志系统（log4cplus）
+
+grpc_version 用 log4cplus 替代 `std::cout`/`std::cerr` 做结构化日志，核心组件：
+
+- **[log_wrapper.h](grpc_version/log_wrapper.h) / [log_wrapper.cc](grpc_version/log_wrapper.cc)**：封装日志初始化与命名 logger。`serverLogger()` 返回 `grpc.server`，`clientLogger()` 返回 `grpc.client`。全局 `Initializer` 保证生命周期。
+- **[log4cplus.properties](grpc_version/log4cplus.properties)**：日志配置。改这一文件可调级别/格式/输出，无需重编译。
+
+日志级别（升序）：`TRACE < DEBUG < INFO < WARN < ERROR < FATAL`。各级别用法见代码：
+
+| 级别 | 用途 | 代码示例 |
+|---|---|---|
+| ERROR | 文件打不开、RPC 失败 | [ais_server.cc:29](grpc_version/ais_server.cc#L29) |
+| WARN | 配置文件缺失（回退默认） | [log_wrapper.cc:22](grpc_version/log_wrapper.cc#L22) |
+| INFO | 关键流程节点（提取条数、监听就绪） | [ais_server.cc:41](grpc_version/ais_server.cc#L41) |
+| DEBUG | 逐条明细（客户端接收） | [ais_client.cc:54](grpc_version/ais_client.cc#L54) |
+
+**运行时调级别**（改配置不重编译）：编辑 `log4cplus.properties` 第 5 行
+```properties
+log4cplus.rootLogger=DEBUG, CONSOLE, FILE   # 改 DEBUG→WARN 即可过滤 DEBUG/INFO
+```
+改完重启程序生效。生产建议 `INFO`（够定位问题、不刷屏），调试用 `DEBUG`（全看明细）。
 
 ---
 

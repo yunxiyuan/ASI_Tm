@@ -1,6 +1,5 @@
 #include <chrono>
 #include <fstream>
-#include <iostream>
 #include <memory>
 #include <regex>
 #include <string>
@@ -8,6 +7,8 @@
 
 #include <grpcpp/grpcpp.h>
 #include "ais.grpc.pb.h"
+#include "log_wrapper.h"
+#include <log4cplus/loggingmacros.h>
 
 using grpc::Server;
 using grpc::ServerBuilder;
@@ -25,7 +26,8 @@ std::vector<std::string> extractAisSentences(const std::string& filepath) {
   std::vector<std::string> sentences;
   std::ifstream file(filepath);
   if (!file.is_open()) {
-    std::cerr << "[错误] 无法打开文件: " << filepath << std::endl;
+    LOG4CPLUS_ERROR(serverLogger(),
+                    LOG4CPLUS_TEXT("无法打开文件: ") << filepath);
     return sentences;
   }
   std::regex pattern(R"(!AIVD[OM],[^\r\n]+)");
@@ -36,7 +38,8 @@ std::vector<std::string> extractAisSentences(const std::string& filepath) {
       sentences.push_back(match.str());
     }
   }
-  std::cout << "[信息] 从文件提取到 " << sentences.size() << " 条 AIS 语句" << std::endl;
+  LOG4CPLUS_INFO_FMT(serverLogger(), "从文件提取到 %d 条 AIS 语句",
+                     (int)sentences.size());
   return sentences;
 }
 
@@ -75,9 +78,9 @@ class AisServiceImpl final : public AisService::Service {
       count++;
     }
 
-    std::cout << "[信息] 客户端请求 filter=" << request->filter()
-              << " max=" << request->max_count()
-              << " → 发送了 " << count << " 条" << std::endl;
+    LOG4CPLUS_INFO_FMT(serverLogger(),
+                       "客户端请求 filter=%s max=%d → 发送了 %d 条",
+                       request->filter().c_str(), request->max_count(), count);
     return Status::OK;
   }
 
@@ -89,8 +92,12 @@ class AisServiceImpl final : public AisService::Service {
 // main
 // ============================================================
 int main(int argc, char* argv[]) {
+  // 日志系统初始化:配置文件与可执行文件同目录(CMake 已拷贝到 build 目录)
+  initLogging("log4cplus.properties");
+
   if (argc < 2) {
-    std::cerr << "用法: " << argv[0] << " <输入文件> [--port 50051]" << std::endl;
+    LOG4CPLUS_ERROR_FMT(serverLogger(), "用法: %s <输入文件> [--port 50051]",
+                        argv[0]);
     return 1;
   }
 
@@ -104,7 +111,7 @@ int main(int argc, char* argv[]) {
   // 提取 AIS 语句
   auto sentences = extractAisSentences(filepath);
   if (sentences.empty()) {
-    std::cerr << "[错误] 未提取到任何 AIS 语句" << std::endl;
+    LOG4CPLUS_ERROR(serverLogger(), LOG4CPLUS_TEXT("未提取到任何 AIS 语句"));
     return 1;
   }
 
@@ -115,8 +122,9 @@ int main(int argc, char* argv[]) {
   builder.RegisterService(&service);
   std::unique_ptr<Server> server(builder.BuildAndStart());
 
-  std::cout << "[就绪] gRPC AIS 服务端监听 " << server_address << std::endl;
-  std::cout << "[提示] 按 Ctrl+C 停止" << std::endl;
+  LOG4CPLUS_INFO(serverLogger(),
+                 LOG4CPLUS_TEXT("gRPC AIS 服务端监听 ") << server_address);
+  LOG4CPLUS_INFO(serverLogger(), LOG4CPLUS_TEXT("按 Ctrl+C 停止"));
   server->Wait();
   return 0;
 }
